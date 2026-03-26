@@ -1,0 +1,9 @@
+pandas
+numpy
+selenium
+transformers
+torch
+sentence-transformers
+matplotlib
+jinja2
+python-dotenv
