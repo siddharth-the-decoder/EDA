@@ -1,121 +1,77 @@
 # -*- coding: utf-8 -*-
-"""
-Send Personalized Emails
-------------------------
-✔ Reads recommendations
-✔ Uses HTML template
-✔ Sends emails via SMTP
-✔ Supports --dry mode (safe testing)
-"""
 
 import os
 import smtplib
-import argparse
 import pandas as pd
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from jinja2 import Template
 
-# ===== PATHS =====
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-RECS_PATH = os.path.join(BASE_DIR, "data", "processed", "contextual_recommendations.csv")
-TPL_PATH = os.path.join(BASE_DIR, "emails", "template.html")
+RECS = "data/processed/contextual_recommendations.csv"
+LOG = "data/processed/sent_log.csv"
 
-# ===== LOAD DATA =====
-def load_recommendations():
-    if not os.path.exists(RECS_PATH):
-        raise FileNotFoundError("❌ Missing recommendations file")
+# ===== LOAD ENV =====
+load_dotenv()
 
-    df = pd.read_csv(RECS_PATH)
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER = os.getenv("SMTP_USERNAME")
+SMTP_PASS = os.getenv("SMTP_PASSWORD")
+MAIL_FROM = os.getenv("MAIL_FROM")
 
-    if "email" not in df.columns:
-        raise ValueError("CSV missing email column")
-
-    print(f"✅ Loaded {len(df)} recommendations")
-    return df
-
-# ===== LOAD TEMPLATE =====
-def load_template():
-    if not os.path.exists(TPL_PATH):
-        raise FileNotFoundError("❌ Missing email template")
-
-    with open(TPL_PATH, "r", encoding="utf-8") as f:
-        return Template(f.read())
+# ===== LOAD LOG =====
+def load_log():
+    if os.path.exists(LOG):
+        return pd.read_csv(LOG)
+    return pd.DataFrame(columns=["email"])
 
 # ===== SEND EMAIL =====
-def send_email(host, port, user, password, sender, receiver, html, subject, dry):
-    msg = MIMEMultipart("alternative")
+def send_email(to_email, subject, body):
+    msg = MIMEMultipart()
+    msg["From"] = MAIL_FROM
+    msg["To"] = to_email
     msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = receiver
 
-    msg.attach(MIMEText(html, "html"))
+    msg.attach(MIMEText(body, "plain"))
 
-    if dry:
-        print(f"[DRY] Email to {receiver}")
-        return
-
-    with smtplib.SMTP(host, port) as server:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
-        server.login(user, password)
-        server.sendmail(sender, [receiver], msg.as_string())
-
-    print(f"✅ Sent email to {receiver}")
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
 
 # ===== MAIN =====
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry", action="store_true")
-    args = parser.parse_args()
+    df = pd.read_csv(RECS)
+    sent = load_log()
 
-    load_dotenv()
+    already = set(sent["email"].tolist())
+    new = []
 
-    SMTP_HOST = os.getenv("SMTP_HOST")
-    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER = os.getenv("SMTP_USERNAME")
-    SMTP_PASS = os.getenv("SMTP_PASSWORD")
-    MAIL_FROM = os.getenv("MAIL_FROM", "EventHub <noreply@example.com>")
+    for email in df["email"].unique():
+        if email in already:
+            print(f"⏩ Skipping {email}")
+            continue
 
-    if not SMTP_HOST and not args.dry:
-        print("❌ Missing SMTP credentials")
-        return
+        print(f"📧 Sending to {email}")
 
-    recs = load_recommendations()
-    template = load_template()
+        user_events = df[df["email"] == email].head(3)
 
-    grouped = recs.groupby("email")
+        body = "Your Event Recommendations:\n\n"
 
-    print("📧 Sending emails...")
+        for _, row in user_events.iterrows():
+            body += f"- {row['matched_event']} ({row['date']}, {row['venue']})\n"
 
-    for email, user_recs in grouped:
-        name = user_recs["full_name"].iloc[0]
+        try:
+            send_email(email, "🎉 Your Event Recommendations", body)
+            new.append(email)
+            print(f"✅ Sent to {email}")
+        except Exception as e:
+            print(f"❌ Failed for {email}: {e}")
 
-        events = []
-        for _, row in user_recs.head(3).iterrows():
-            events.append({
-                "title": row.get("matched_event"),
-                "date": row.get("date"),
-                "venue": row.get("venue"),
-                "source_url": row.get("source_url"),
-            })
+    if new:
+        pd.DataFrame({"email": new}).to_csv(LOG, index=False)
 
-        html = template.render(full_name=name, events=events)
+    print("✅ Emails processed")
 
-        send_email(
-            SMTP_HOST,
-            SMTP_PORT,
-            SMTP_USER,
-            SMTP_PASS,
-            MAIL_FROM,
-            email,
-            html,
-            "🎉 Your Event Recommendations",
-            args.dry
-        )
-
-    print("✅ All emails processed")
-
-# ===== ENTRY =====
 if __name__ == "__main__":
     main()

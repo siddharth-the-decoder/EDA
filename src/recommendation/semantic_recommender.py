@@ -1,101 +1,111 @@
-# -*- coding: utf-8 -*-
-"""
-Semantic Recommender
---------------------
-✔ Matches events with user preferences
-✔ Uses Sentence Transformers
-✔ Generates contextual recommendations
-✔ Saves to data/processed/contextual_recommendations.csv
-"""
-
-import os
 import pandas as pd
 from sentence_transformers import SentenceTransformer, util
+from datetime import datetime
 
-# ===== PATHS =====
-EVENTS_PATH = "data/processed/classified_events_with_departments.csv"
-USERS_PATH = "data/users/users.csv"
-OUTPUT_PATH = "data/processed/contextual_recommendations.csv"
+EVENTS = "data/processed/classified_events_with_departments.csv"
+USERS = "data/users/users.csv"
+OUTPUT = "data/processed/contextual_recommendations.csv"
 
-# ===== LOAD MODEL =====
-print("🤖 Loading embedding model...")
+print("🤖 Loading model...")
 model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 # ===== SIMILARITY =====
-def get_similarity(text1, text2):
-    emb1 = model.encode(text1, convert_to_tensor=True)
-    emb2 = model.encode(text2, convert_to_tensor=True)
-    return util.cos_sim(emb1, emb2).item()
+def similarity(a, b):
+    return util.cos_sim(
+        model.encode(a, convert_to_tensor=True),
+        model.encode(b, convert_to_tensor=True)
+    ).item()
+
+# ===== DATE SCORE =====
+def recency_score(date_str):
+    if not date_str or pd.isna(date_str):
+        return 0.2
+
+    try:
+        event_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        days_diff = (event_date - datetime.now()).days
+
+        if days_diff < 0:
+            return 0  # past event
+        elif days_diff <= 3:
+            return 1
+        elif days_diff <= 10:
+            return 0.7
+        else:
+            return 0.4
+    except:
+        return 0.2
 
 # ===== MAIN =====
-def generate_recommendations(top_k=5):
-    if not os.path.exists(EVENTS_PATH):
-        print("❌ Missing classified events file")
-        return
-
-    if not os.path.exists(USERS_PATH):
-        print("❌ Missing users file")
-        return
-
-    events = pd.read_csv(EVENTS_PATH)
-    users = pd.read_csv(USERS_PATH)
-
-    if events.empty:
-        print("⚠️ No events available")
-        return
+def main():
+    events = pd.read_csv(EVENTS)
+    users = pd.read_csv(USERS)
 
     results = []
 
-    print("🧠 Generating recommendations...")
+    print("🧠 Generating smart recommendations...")
 
     for _, user in users.iterrows():
         email = user["email"]
-        name = user.get("full_name", "Student")
+        name = user["full_name"]
 
-        # combine preferences
-        broad = str(user.get("broad_prefs", ""))
-        specific = str(user.get("specific_prefs", ""))
+        broad = str(user.get("broad_prefs", "")).lower()
+        specific = str(user.get("specific_prefs", "")).lower()
 
         pref_text = (broad + " ") * 1 + (specific + " ") * 2
 
-        scored_events = []
+        scored = []
 
-        for _, event in events.iterrows():
-            event_text = " ".join([
-                str(event.get("title", "")),
-                str(event.get("predicted_department", "")),
-                str(event.get("type", "")),
-                str(event.get("raw_text", "")),
-            ])
+        for _, e in events.iterrows():
+            title = str(e.get("title", ""))
+            dept = str(e.get("predicted_department", "")).lower()
+            etype = str(e.get("type", "")).lower()
+            raw = str(e.get("raw_text", ""))
 
-            score = get_similarity(pref_text, event_text)
+            if not title:
+                continue
 
-            scored_events.append((score, event))
+            event_text = f"{title} {dept} {etype} {raw}"
 
-        # sort by similarity
-        scored_events.sort(key=lambda x: x[0], reverse=True)
+            # ===== SCORES =====
+            sem_score = similarity(pref_text, event_text)
 
-        # pick top_k
-        for score, event in scored_events[:top_k]:
+            dept_score = 1 if broad in dept else 0
+
+            type_score = 1 if specific in etype else 0
+
+            rec_score = recency_score(e.get("date", ""))
+
+            final_score = (
+                0.6 * sem_score +
+                0.2 * dept_score +
+                0.1 * type_score +
+                0.1 * rec_score
+            )
+
+            scored.append((final_score, e))
+
+        # sort by score
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # top 5
+        for score, e in scored[:5]:
             results.append({
                 "email": email,
                 "full_name": name,
-                "matched_event": event.get("title", ""),
-                "predicted_department": event.get("predicted_department", ""),
-                "date": event.get("date", ""),
-                "venue": event.get("venue", ""),
-                "type": event.get("type", ""),
-                "source_url": event.get("source_url", ""),
-                "similarity_score": round(score, 3)
+                "matched_event": e.get("title", ""),
+                "predicted_department": e.get("predicted_department", ""),
+                "type": e.get("type", ""),
+                "date": e.get("date", ""),
+                "venue": e.get("venue", ""),
+                "source_url": e.get("source_url", ""),
+                "final_score": round(score, 3)
             })
 
     df = pd.DataFrame(results)
+    df.to_csv(OUTPUT, index=False)
 
-    os.makedirs("data/processed", exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False)
+    print(f"✅ Smart recommendations saved → {OUTPUT}")
 
-    print(f"✅ Recommendations saved to {OUTPUT_PATH}")
-
-# ===== ENTRY =====
 if __name__ == "__main__":
-    generate_recommendations(top_k=5)
+    main()
